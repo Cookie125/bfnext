@@ -5,6 +5,7 @@ use dcso3::{coalition::{Coalition, Side}, net::Ucid, Vector3};
 use serde_derive::{Deserialize, Serialize};
 
 use crate::missions::Mission;
+
 use super::{Db, Map};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ impl Pmc {
         Ok(())
     }
 }
+
 
 impl Db {
     pub fn pmc(&self, name: &str) -> Option<&Pmc> {
