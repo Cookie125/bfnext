@@ -21,6 +21,7 @@ pub mod db;
 pub mod ewr;
 pub mod jtac;
 pub mod menu;
+pub mod missions;
 pub mod msgq;
 pub mod perf;
 pub mod spawnctx;
