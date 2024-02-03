@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result, bail};
-use dcso3::{coalition::Side, net::Ucid, Vector3};
+use dcso3::{coalition::{Coalition, Side}, net::Ucid, Vector3};
 use serde_derive::{Deserialize, Serialize};
+
+use crate::missions::Mission;
 
 use super::{Db, Map};
 
@@ -31,6 +33,8 @@ pub struct Pmc {
     pub funds: isize,
     pub players: Map<Ucid, PlayerInfo>,
     pub inventory: Map<String, (String, isize)>,
+    pub missions : Vec<Mission>,
+    pub coalition : isize
 }
 
 impl Pmc {
@@ -47,7 +51,13 @@ impl Pmc {
     fn get_player(self, ucid: &Ucid) -> Option<PlayerInfo> {
         self.players.get(ucid).clone().cloned()
     }
+
+    pub fn add_mission(&mut self, mission: Mission) -> Result<()> {
+        self.missions.push(mission);
+        Ok(())
+    }
 }
+
 
 impl Db {
     pub fn pmc(&self, name: &str) -> Option<&Pmc> {
@@ -62,6 +72,16 @@ impl Db {
                 self.ephemeral.dirty();
             }
         }
+        Ok(())
+    }
+
+    pub fn save_pmc(&mut self, pmc: Pmc) -> Result<()> {
+        match self.persisted.pmcs.get_key(&pmc.name) {
+            Some(p) => {self.persisted.pmcs.insert(p.clone(), pmc);}
+            None => {
+                self.register_pmc(pmc)?
+            }
+        };
         Ok(())
     }
 }
