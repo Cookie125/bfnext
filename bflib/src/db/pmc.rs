@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 
 use anyhow::{anyhow, Result, bail};
-use dcso3::{coalition::{Coalition, Side}, net::Ucid, Vector3};
+use dcso3::{coalition::{Side}, net::Ucid, Vector3};
 use serde_derive::{Deserialize, Serialize};
 
 use crate::missions::Mission;
