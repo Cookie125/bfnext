@@ -1347,11 +1347,18 @@ impl<'lua> SplashDamage {
                     let ground_height = self.get_ground_height(lua, current_position);
                     let altitude_above_ground = current_position.0.y - ground_height;
                     
-                    if altitude_above_ground < 2.0 || current_speed < 10.0 {
+                    // Check for impact conditions:
+                    // 1. Very close to ground (< 10m)
+                    // 2. Very slow speed (< 20m/s) 
+                    // 3. Sudden velocity change (impact detection)
+                    let velocity_change = (current_velocity.0 - tracked_weapon.velocity.0).magnitude();
+                    let has_sudden_stop = velocity_change > 200.0; // Sudden deceleration
+                    
+                    if altitude_above_ground < 10.0 || current_speed < 20.0 || has_sudden_stop {
                         // Weapon has impacted (more accurate detection like Lua script)
                         debug!(
-                            "SPLASH: Weapon {} impacted at altitude {:.2}m above ground (speed: {:.1}m/s), creating explosion",
-                            tracked_weapon.weapon_type, altitude_above_ground, current_speed
+                            "SPLASH: Weapon {} impacted at altitude {:.2}m above ground (speed: {:.1}m/s, velocity_change: {:.1}m/s), creating explosion",
+                            tracked_weapon.weapon_type, altitude_above_ground, current_speed, velocity_change
                         );
                         
                         // Use predicted impact point if available, otherwise use current position
@@ -1730,17 +1737,30 @@ impl<'lua> SplashDamage {
             self.config.blast_wave.search_radius
         };
         
-        // Create the main explosion
-        self.create_explosion(lua, weapon_type, *center)?;
+        // Get ground-adjusted position for the explosion (same as used in create_explosion)
+        let ground_height = self.get_ground_height(lua, *center);
+        let height_offset = 0.1; // Small offset above ground
+        let adjusted_height = ground_height + height_offset;
+        let ground_position = LuaVec3(na::Vector3::new(
+            center.0.x,
+            adjusted_height,
+            center.0.z,
+        ));
+        
+        debug!("SPLASH: Ground positioning for blast wave - Original: {:?}, Ground height: {:.2}m, Final: {:?}", 
+               center, ground_height, ground_position);
+        
+        // Create the main explosion at ground level
+        self.create_explosion(lua, weapon_type, ground_position)?;
         
         // Add to recent explosions for ordnance protection
-        self.add_recent_explosion(center, blast_radius);
+        self.add_recent_explosion(&ground_position, blast_radius);
         
-        // Execute blast wave with cascading explosions
-        self.execute_blast_wave(lua, center, blast_radius, power, weapon_type)?;
+        // Execute blast wave with cascading explosions at ground level
+        self.execute_blast_wave(lua, &ground_position, blast_radius, power, weapon_type)?;
         
         // Schedule additional wave effects
-        self.schedule_wave_effects(lua, center, blast_radius, power, weapon_type, Vec::new())?;
+        self.schedule_wave_effects(lua, &ground_position, blast_radius, power, weapon_type, Vec::new())?;
         
         Ok(())
     }
@@ -1790,18 +1810,20 @@ impl<'lua> SplashDamage {
         
         let mut found_units = Vec::new();
         
-        // Create search volume (sphere around the explosion center)
-        let search_volume = dcso3::world::SearchVolume::Sphere {
-            point: *center,
-            radius: radius as f64,
-        };
+        debug!("SPLASH: Search details - Center: {:?}, Radius: {:.1}m", center, radius);
         
-        // Search for units in the area using the new collect method
+        // Search for units in the area using the working Lua-style method
         let world = dcso3::world::World::singleton(lua)?;
-        let objects = world.search_objects_collect(
-            dcso3::object::ObjectCategory::Unit,
-            search_volume,
+        debug!("SPLASH: Using multi-category search (UNIT, STATIC, SCENERY, CARGO) at point {:?} with radius {}", 
+               center, radius);
+        
+        // Use multi-category search like the Lua script does (UNIT, STATIC, SCENERY, CARGO)
+        let objects = world.search_objects_multi_category(
+            *center,
+            radius as f64, // Convert f32 to f64 for the method
         )?;
+        
+        debug!("SPLASH: DCS search returned {} objects", objects.len());
         
         // Process each found object
         for object in objects {
