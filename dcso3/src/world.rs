@@ -201,6 +201,52 @@ impl<'lua> World<'lua> {
             .call_function("searchObjects", (category, volume, f, arg))?)
     }
 
+    /// Search for objects and return them as a collection
+    /// This is more convenient than the closure-based approach for many use cases
+    pub fn search_objects_collect(
+        &self,
+        category: ObjectCategory,
+        volume: SearchVolume,
+    ) -> Result<Vec<Object<'lua>>> {
+        // Create a table to store the results
+        let results_table = self.lua.create_table()?;
+        let count = 0i32;
+        
+        let f = self
+            .lua
+            .create_function(move |lua, (o, _count): (Object, i32)| {
+                // Store the object in the results table
+                let results: LuaTable = lua.globals().raw_get("__search_results")?;
+                let current_count: i32 = lua.globals().raw_get("__search_count")?;
+                results.raw_set(current_count + 1, o)?;
+                lua.globals().raw_set("__search_count", current_count + 1)?;
+                Ok(true) // Continue searching
+            })?;
+            
+        // Set up global variables for the search
+        self.lua.globals().raw_set("__search_results", results_table.clone())?;
+        self.lua.globals().raw_set("__search_count", 0i32)?;
+        
+        // Perform the search
+        self.t.call_function::<_, ()>("searchObjects", (category, volume, f, count))?;
+        
+        // Collect the results
+        let final_count: i32 = self.lua.globals().raw_get("__search_count")?;
+        let mut objects = Vec::new();
+        
+        for i in 1..=final_count {
+            if let Ok(obj) = results_table.raw_get::<_, Object>(i) {
+                objects.push(obj);
+            }
+        }
+        
+        // Clean up global variables
+        self.lua.globals().raw_remove("__search_results")?;
+        self.lua.globals().raw_remove("__search_count")?;
+        
+        Ok(objects)
+    }
+
     pub fn remove_junk(&self, volume: SearchVolume) -> Result<i64> {
         Ok(self.t.call_function("removeJunk", volume)?)
     }

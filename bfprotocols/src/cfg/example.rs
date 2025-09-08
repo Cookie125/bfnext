@@ -1936,6 +1936,7 @@ impl Default for Cfg {
             ]),
             life_types: default_life_types(),
             limited_lives: true,
+            splash: true,
             actions: FxHashMap::from_iter([
                 (Side::Red, default_red_actions()),
                 (Side::Blue, default_blue_actions()),

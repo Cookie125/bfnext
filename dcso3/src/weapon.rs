@@ -116,6 +116,14 @@ impl<'lua> Weapon<'lua> {
     pub fn get_desc(&self) -> Result<mlua::Table<'lua>> {
         Ok(self.t.call_method("getDesc", ())?)
     }
+
+    pub fn get_point(&self) -> Result<crate::LuaVec3> {
+        Ok(self.t.call_method("getPoint", ())?)
+    }
+
+    pub fn get_velocity(&self) -> Result<crate::LuaVec3> {
+        Ok(self.t.call_method("getVelocity", ())?)
+    }
 }
 
 #[derive(Debug, Clone)]

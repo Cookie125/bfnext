@@ -25,6 +25,7 @@ mod menu;
 mod msgq;
 mod shots;
 mod spawnctx;
+mod splash;
 
 extern crate nalgebra as na;
 use crate::db::player::SlotAuth;
@@ -47,7 +48,7 @@ use db::{
     player::{RegErr, TakeoffRes},
 };
 use dcso3::{
-    HooksLua, LuaEnv, MizLua, String,
+    HooksLua, LuaEnv, MizLua, Position3, String,
     coalition::Side,
     env::{
         self, Env,
@@ -247,6 +248,7 @@ struct Context {
     airborne: FxHashSet<DcsOid<ClassUnit>>,
     captureable: FxHashMap<ObjectiveId, usize>,
     shots_out: ShotDb,
+    splash_damage: splash::SplashDamage,
     menu_init_queue: IndexSet<SlotId, FxBuildHasher>,
     last_frame: Option<DateTime<Utc>>,
     last_slow_timed_events: DateTime<Utc>,
@@ -630,6 +632,29 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         error!("error processing hit event {:?}", e)
                     }
                 }
+                
+                // Handle splash damage for unit hits
+                if ctx.db.ephemeral.cfg.splash {
+                    if let Some(unit_id) = ctx.db.ephemeral.get_uid_by_object_id(&target.object_id()?) {
+                        if let Err(e) = ctx.splash_damage.handle_unit_hit(
+                            lua,
+                            *unit_id,
+                            &target.get_name()?,
+                            &target.get_type_name()?,
+                            Position3 { 
+                                p: target.get_point()?,
+                                x: target.get_point()?,
+                                y: target.get_point()?,
+                                z: target.get_point()?
+                            },
+                            target.get_life()? as f32 / target.get_life_max()? as f32,
+                            dead,
+                        ) {
+                            error!("error processing splash damage for unit hit {:?}", e)
+                        }
+                    }
+                }
+                
                 if dead {
                     if let Err(e) = unit_killed(lua, ctx, target.object_id()?, start_ts) {
                         error!("0 unit killed failed {:?}", e)
@@ -646,6 +671,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         Event::Shot(e) => {
             if let Err(e) = ctx.shots_out.shot(&ctx.db, start_ts, &e) {
                 error!("error processing shot event {:?}", e)
+            }
+            // Track weapon for splash damage
+            if ctx.db.ephemeral.cfg.splash {
+                if let Err(e) = ctx.splash_damage.handle_weapon_shot(lua, &ctx.db, &e, start_ts) {
+                    error!("error tracking weapon for splash damage {:?}", e)
+                }
             }
             ()
         }
@@ -1050,6 +1081,14 @@ fn run_slow_timed_events(
             error!("error doing repairs {:?}", e)
         }
         record_perf(&mut perf.do_repairs, start_ts);
+        
+        // cleanup splash damage tracking and check for impacts
+        if ctx.db.ephemeral.cfg.splash {
+            if let Err(e) = ctx.splash_damage.cleanup(lua, ts) {
+                error!("error in splash damage cleanup {:?}", e)
+            }
+        }
+        
         if let Err(e) = ctx.db.advance_actions(lua, &ctx.idx, &ctx.jtac, start_ts) {
             error!("could not advance actions {e:?}")
         }
@@ -1282,6 +1321,10 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         debug!("saved state exists, loading it");
         ctx.db = Db::load(&miz, &ctx.idx, to_bg, cfg, &path).context("loading the saved state")?;
     }
+    
+    // Update splash damage configuration from main config
+    ctx.splash_damage.update_from_main_config(ctx.db.ephemeral.cfg.splash);
+    
     ctx.shutdown = ctx
         .db
         .ephemeral

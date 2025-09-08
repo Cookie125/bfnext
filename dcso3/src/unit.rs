@@ -158,6 +158,10 @@ impl<'lua> Unit<'lua> {
         Ok(self.t.call_method("getLife0", ())?)
     }
 
+    pub fn get_life_max(&self) -> Result<i32> {
+        Ok(self.t.call_method("getLifeMax", ())?)
+    }
+
     pub fn get_fuel(&self) -> Result<f32> {
         Ok(self.t.call_method("getFuel", ())?)
     }

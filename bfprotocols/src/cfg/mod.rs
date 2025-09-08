@@ -734,6 +734,10 @@ fn default_limited_lives() -> bool {
     true
 }
 
+fn default_splash() -> bool {
+    true
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -829,6 +833,9 @@ pub struct Cfg {
     /// and life_types specification
     #[serde(default = "default_limited_lives")]
     pub limited_lives: bool,
+    /// If true, splash damage and cook-off effects are enabled
+    #[serde(default = "default_splash")]
+    pub splash: bool,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,
@@ -875,9 +882,11 @@ impl Cfg {
 
     pub fn load(miz_state_path: &Path) -> Result<Self> {
         let path = Self::path(miz_state_path);
-        let file = loop {
+        
+        // Ensure config file exists, create with defaults if not
+        loop {
             match File::open(&path) {
-                Ok(f) => break f,
+                Ok(_) => break,
                 Err(e) => match e.kind() {
                     io::ErrorKind::NotFound => {
                         let file = File::create(&path)
@@ -890,9 +899,23 @@ impl Cfg {
                     }
                 },
             }
-        };
+        }
+        
+        // Read the raw JSON to check if splash field is present
+        let file = File::open(&path)
+            .map_err(|e| anyhow!("error opening config file {:?}", e))?;
+        let raw_json: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|e| anyhow!("failed to decode cfg file as JSON {:?}, {:?}", path, e))?;
+        
+        // Check if splash field is missing
+        let splash_missing = !raw_json.get("splash").is_some();
+        
+        // Now deserialize to the actual struct
+        let file = File::open(&path)
+            .map_err(|e| anyhow!("error opening config file {:?}", e))?;
         let mut cfg: Self = serde_json::from_reader(file)
             .map_err(|e| anyhow!("failed to decode cfg file {:?}, {:?}", path, e))?;
+        
         for (_, actions) in &mut cfg.actions {
             actions.sort_by(|name0, _, name1, _| name0.cmp(name1));
         }
@@ -910,7 +933,9 @@ impl Cfg {
                 }
             }
         }
-        if has_deprecated {
+        
+        // Write the config file back if we have deprecated fields or missing splash field
+        if has_deprecated || splash_missing {
             fs::write(path, serde_json::to_string_pretty(&cfg)?)?
         }
         Ok(cfg)
