@@ -144,6 +144,8 @@ pub struct FlareTimingConfig {
 pub struct FlareConfig {
     /// Enable/disable flare effects for cook-offs
     pub enabled: bool,
+    /// Flare color (matches Lua cookoff_flare_color)
+    pub color: u8,
     /// Flare instant configuration
     pub instant: FlareInstantConfig,
     /// Flare timing configuration
@@ -242,6 +244,7 @@ impl Default for FlareConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            color: 2, // Matches Lua cookoff_flare_color = 2
             instant: FlareInstantConfig::default(),
             timing: FlareTimingConfig::default(),
         }
@@ -1023,11 +1026,11 @@ impl Default for SplashConfig {
                 recent_large_explosion_range: 100.0,
                 recent_large_explosion_time: 4.0,
             },
-            overall_scaling: 1.0,
+            overall_scaling: 1.5, // Increased from 1.0 to create more damage
             rocket_multiplier: 1.3,
             only_players_weapons: false,
-            cascade_damage_threshold: 0.1,
-            cascade_explode_threshold: 60.0,
+            cascade_damage_threshold: 0.05, // Lowered from 0.1 to trigger more cascade explosions
+            cascade_explode_threshold: 80.0, // Lowered from 60.0 to allow more units to trigger cascade
             cascade_scaling: 2.0,
         }
     }
@@ -1347,59 +1350,45 @@ impl<'lua> SplashDamage {
                     let ground_height = self.get_ground_height(lua, current_position);
                     let altitude_above_ground = current_position.0.y - ground_height;
                     
-                    // Check for impact conditions:
-                    // 1. Very close to ground (< 10m)
-                    // 2. Very slow speed (< 20m/s) 
-                    // 3. Sudden velocity change (impact detection)
-                    let velocity_change = (current_velocity.0 - tracked_weapon.velocity.0).magnitude();
-                    let has_sudden_stop = velocity_change > 200.0; // Sudden deceleration
+                    // Lua script approach: if weapon exists, keep tracking; if not, it impacted
+                    // Since we successfully got the weapon object, it still exists - keep tracking
+                    debug!(
+                        "SPLASH: Weapon {} still in flight at altitude {:.2}m above ground, speed {:.2}m/s - updating position/velocity",
+                        tracked_weapon.weapon_type, altitude_above_ground, current_speed
+                    );
                     
-                    if altitude_above_ground < 10.0 || current_speed < 20.0 || has_sudden_stop {
-                        // Weapon has impacted (more accurate detection like Lua script)
-                        debug!(
-                            "SPLASH: Weapon {} impacted at altitude {:.2}m above ground (speed: {:.1}m/s, velocity_change: {:.1}m/s), creating explosion",
-                            tracked_weapon.weapon_type, altitude_above_ground, current_speed, velocity_change
-                        );
-                        
-                        // Use predicted impact point if available, otherwise use current position
-                        let explosion_point = predicted_impact.unwrap_or(current_position);
-                        
-                        // Get explosion power for wave explosion
-                        let explosion_power = self.config.get_weapon_power(&tracked_weapon.weapon_type).unwrap_or(0.0);
-                        if explosion_power > 0.0 {
-                            // Collect explosion data for later creation
-                            explosions_to_create.push((explosion_point, explosion_power, tracked_weapon.weapon_type.clone()));
-                        }
-                        
-                        weapons_to_remove.push(weapon_id.clone());
-                    } else {
-                        // Weapon is still in flight, update tracking data (continuous position/velocity update)
-                        debug!(
-                            "SPLASH: Weapon {} still in flight at altitude {:.2}m above ground, speed {:.2}m/s - updating position/velocity",
-                            tracked_weapon.weapon_type, altitude_above_ground, current_speed
-                        );
-                        
-                        // Update weapon tracking data
-                        let mut updated_weapon = tracked_weapon.clone();
-                        updated_weapon.position = current_position;
-                        updated_weapon.velocity = current_velocity;
-                        updated_weapon.speed = current_speed;
-                        updated_weapon.predicted_impact = predicted_impact;
-                        updated_weapon.last_update = now;
-                        
-                        
-                        weapons_to_update.push((weapon_id.clone(), updated_weapon));
-                    }
+                    // Update weapon tracking data (like Lua lines 3395-3397)
+                    let mut updated_weapon = tracked_weapon.clone();
+                    updated_weapon.position = current_position;
+                    updated_weapon.velocity = current_velocity;
+                    updated_weapon.speed = current_speed;
+                    updated_weapon.predicted_impact = predicted_impact;
+                    updated_weapon.last_update = now;
+                    
+                    weapons_to_update.push((weapon_id.clone(), updated_weapon));
                 }
                 Err(_) => {
-                    // Can't get weapon object, assume it has impacted
-                    debug!("SPLASH: Cannot get weapon object for {}, assuming impact", tracked_weapon.weapon_type);
-                    weapons_to_remove.push(weapon_id.clone());
+                    // Weapon no longer exists - it has impacted (like Lua line 3515-3517)
+                    debug!("SPLASH: Weapon {} no longer exists, assuming impact", tracked_weapon.weapon_type);
                     
-                    // Create explosion at last known position
+                    // Use Lua script approach: get terrain intersection point (like Lua lines 3519-3525)
+                    // local ip = land.getIP(wpnData.pos, wpnData.dir, lookahead(wpnData.speed))
+                    // local explosionPoint = ip or wpnData.pos
+                    let explosion_point = if let Some(predicted_impact) = tracked_weapon.predicted_impact {
+                        predicted_impact
+                    } else {
+                        // Fallback to last known position if no predicted impact
+                        tracked_weapon.position
+                    };
+                    
+                    debug!("SPLASH: Weapon {} impacted at {:?}, creating explosion", tracked_weapon.weapon_type, explosion_point);
+                    
+                    // Get explosion power and create explosion
                     if let Some(explosion_power) = self.config.get_weapon_power(&tracked_weapon.weapon_type) {
-                        explosions_to_create.push((tracked_weapon.position, explosion_power, tracked_weapon.weapon_type.clone()));
+                        explosions_to_create.push((explosion_point, explosion_power, tracked_weapon.weapon_type.clone()));
                     }
+                    
+                    weapons_to_remove.push(weapon_id.clone());
                 }
             }
         }
@@ -1493,11 +1482,12 @@ impl<'lua> SplashDamage {
                         } else {
                             debug!("SPLASH: DCS explosion API call succeeded for weapon {} with power {}", weapon_name, final_power);
                             
-                            // Add smoke effect to make explosion more visible (like Lua script)
-                            if let Err(e) = action.smoke(ground_position, dcso3::trigger::SmokeColor::White) {
-                                debug!("SPLASH: Failed to create smoke effect for weapon {}: {:?}", weapon_name, e);
+                            // Add large black smoke effect for cook-off (like Lua script)
+                            let smoke_name = format!("explosion_smoke_{}", weapon_name);
+                            if let Err(e) = action.effect_smoke_big(ground_position, dcso3::trigger::SmokePreset::LargeSmokeAndFire, 1.0, smoke_name.into()) {
+                                debug!("SPLASH: Failed to create large smoke effect for weapon {}: {:?}", weapon_name, e);
                             } else {
-                                debug!("SPLASH: Created smoke effect for weapon {} at {:?}", weapon_name, ground_position);
+                                debug!("SPLASH: Created large black smoke effect for weapon {} at {:?}", weapon_name, ground_position);
                             }
                         }
                     }
@@ -1545,11 +1535,12 @@ impl<'lua> SplashDamage {
                         } else {
                             debug!("SPLASH: DCS static explosion API call succeeded for weapon {} with power {}", weapon_name, power);
                             
-                            // Add smoke effect to make explosion more visible (like Lua script)
-                            if let Err(e) = action.smoke(ground_position, dcso3::trigger::SmokeColor::White) {
-                                debug!("SPLASH: Failed to create smoke effect for weapon {}: {:?}", weapon_name, e);
+                            // Add large black smoke effect for cook-off (like Lua script)
+                            let smoke_name = format!("static_explosion_smoke_{}", weapon_name);
+                            if let Err(e) = action.effect_smoke_big(ground_position, dcso3::trigger::SmokePreset::LargeSmokeAndFire, 1.0, smoke_name.into()) {
+                                debug!("SPLASH: Failed to create large smoke effect for weapon {}: {:?}", weapon_name, e);
                             } else {
-                                debug!("SPLASH: Created smoke effect for weapon {} at {:?}", weapon_name, ground_position);
+                                debug!("SPLASH: Created large black smoke effect for weapon {} at {:?}", weapon_name, ground_position);
                             }
                         }
                     }
@@ -2919,11 +2910,12 @@ impl CookOff {
         // Use the power directly like the Lua script does - no minimum threshold
         action.explosion(explosion_pos, power)?;
         
-        // Add smoke effect to make explosion more visible (like Lua script)
-        if let Err(e) = action.smoke(explosion_pos, dcso3::trigger::SmokeColor::White) {
-            debug!("COOKOFF: Failed to create smoke effect: {:?}", e);
+        // Add large black smoke effect for cook-off (like Lua script)
+        let smoke_name = format!("cookoff_explosion_smoke_{}", self.effect_smoke_id);
+        if let Err(e) = action.effect_smoke_big(explosion_pos, dcso3::trigger::SmokePreset::MediumSmokeAndFire, 1.0, smoke_name.into()) {
+            debug!("COOKOFF: Failed to create large smoke effect: {:?}", e);
         } else {
-            debug!("COOKOFF: Created smoke effect at {:?}", explosion_pos);
+            debug!("COOKOFF: Created large black smoke effect at {:?}", explosion_pos);
         }
         
         debug!("COOKOFF: Created explosion at {:?} with power {}", explosion_pos, power);
@@ -3012,7 +3004,7 @@ impl CookOff {
     }
 
     /// Schedule cook-off flares with timing
-    fn schedule_cookoff_flares_timed(&mut self, _lua: MizLua, position: &Position3, cookoff_count: u32, cookoff_duration: f32, start_time: DateTime<Utc>) -> Result<()> {
+    fn schedule_cookoff_flares_timed(&mut self, lua: MizLua, position: &Position3, cookoff_count: u32, cookoff_duration: f32, start_time: DateTime<Utc>) -> Result<()> {
 
         // Check flare chance
         if self.rng.gen_range(0.0..1.0) > self.config.flares.timing.chance {
@@ -3025,7 +3017,7 @@ impl CookOff {
         }
 
         if self.config.flares.instant.enabled {
-            // Spawn instant flares (but still with small delays for realism)
+            // Spawn instant flares (like Lua - no delays for instant flares)
             let instant_count = self.rng.gen_range(self.config.flares.instant.min..=self.config.flares.instant.max);
             let angle_step = 360.0 / instant_count as f32;
 
@@ -3046,14 +3038,11 @@ impl CookOff {
                     ..*position
                 };
 
-                // Schedule flare with small random delay (0-2 seconds)
-                let delay_seconds = self.rng.gen_range(0.0..2.0);
-                let trigger_time = start_time + chrono::Duration::milliseconds((delay_seconds * 1000.0) as i64);
-                
+                // Schedule flare immediately (like Lua instant flares)
                 let timed_explosion = TimedExplosion {
                     position: flare_pos,
                     power: 0.0, // Flares don't have explosion power
-                    trigger_time,
+                    trigger_time: start_time, // No delay for instant flares
                     effect_type: ExplosionType::Flare,
                     azimuth: Some(azimuth), // Store the calculated azimuth for the flare
                 };
@@ -3061,7 +3050,7 @@ impl CookOff {
                 self.timed_explosions.push_back(timed_explosion);
             }
         } else {
-            // Spawn flares over time
+            // Spawn flares over time (like Lua time-based flares)
             for _i in 0..flare_count {
                 let delay_seconds = self.rng.gen_range(0.0..1.0) * cookoff_duration;
                 let azimuth = self.rng.gen_range(1..=360) as u16;
@@ -3069,10 +3058,12 @@ impl CookOff {
                 let offset_x = self.rng.gen_range(-self.config.flares.timing.offset..=self.config.flares.timing.offset);
                 let offset_z = self.rng.gen_range(-self.config.flares.timing.offset..=self.config.flares.timing.offset);
 
+                // Use ground height for time-based flares (like Lua)
+                let ground_height = self.get_ground_height(lua, position.p);
                 let flare_pos = Position3 {
                     p: LuaVec3(Vector3::new(
                         position.p.x + offset_x,
-                        position.p.y,
+                        ground_height, // Start at ground level like Lua
                         position.p.z + offset_z,
                     )),
                     ..*position
@@ -3131,7 +3122,14 @@ impl CookOff {
                 let trigger = Trigger::singleton(lua)?;
                 let action = trigger.action()?;
                 
-                let flare_color = FlareColor::White; // All flares are white
+                // Use configurable flare color (like Lua cookoff_flare_color)
+                let flare_color = match self.config.flares.color {
+                    0 => FlareColor::Green,
+                    1 => FlareColor::Red,
+                    2 => FlareColor::White,
+                    3 => FlareColor::Yellow,
+                    _ => FlareColor::White, // Default to white
+                };
 
 
                 action.signal_flare(flare_pos, flare_color, azimuth)?;
@@ -3154,7 +3152,14 @@ impl CookOff {
                 let trigger = Trigger::singleton(lua)?;
                 let action = trigger.action()?;
                 
-                let flare_color = FlareColor::White; // All flares are white
+                // Use configurable flare color (like Lua cookoff_flare_color)
+                let flare_color = match self.config.flares.color {
+                    0 => FlareColor::Green,
+                    1 => FlareColor::Red,
+                    2 => FlareColor::White,
+                    3 => FlareColor::Yellow,
+                    _ => FlareColor::White, // Default to white
+                };
 
 
                 action.signal_flare(flare_pos, flare_color, azimuth)?;
@@ -3366,7 +3371,14 @@ impl CookOff {
                                     match trigger.action() {
                                         Ok(action) => {
                                             debug!("COOKOFF: Got action successfully");
-                                            let flare_color = dcso3::trigger::FlareColor::White;
+                                            // Use configurable flare color (like Lua cookoff_flare_color)
+                                            let flare_color = match self.config.flares.color {
+                                                0 => dcso3::trigger::FlareColor::Green,
+                                                1 => dcso3::trigger::FlareColor::Red,
+                                                2 => dcso3::trigger::FlareColor::White,
+                                                3 => dcso3::trigger::FlareColor::Yellow,
+                                                _ => dcso3::trigger::FlareColor::White, // Default to white
+                                            };
                                             // Use the stored azimuth from scheduling, or generate a random one if not available
                                             let azimuth = timed_explosion.azimuth.unwrap_or_else(|| self.rng.gen_range(0..360) as u16);
                                             
